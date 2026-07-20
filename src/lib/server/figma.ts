@@ -37,14 +37,29 @@ interface FigmaImagesResponse {
 	images?: Record<string, string | null>;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const MAX_RETRIES = 6;
+const MAX_WAIT_MS = 60_000;
+
 async function figmaGet<T>(path: string): Promise<T> {
 	const token = env.FIGMA_TOKEN;
 	if (!token) throw new Error('FIGMA_TOKEN is not set');
-	const res = await fetch(`${FIGMA_API}${path}`, {
-		headers: { 'X-Figma-Token': token }
-	});
-	if (!res.ok) throw new Error(`Figma API ${res.status}: ${await res.text()}`);
-	return res.json() as Promise<T>;
+
+	for (let attempt = 0; ; attempt++) {
+		const res = await fetch(`${FIGMA_API}${path}`, {
+			headers: { 'X-Figma-Token': token }
+		});
+		if (res.status === 429 && attempt < MAX_RETRIES) {
+			const retryAfter = Number(res.headers.get('retry-after')) * 1000 || 0;
+			const wait = Math.min(Math.max(retryAfter, 2000 * 2 ** attempt), MAX_WAIT_MS);
+			console.log(`Figma rate limit hit — waiting ${Math.round(wait / 1000)}s before retry`);
+			await sleep(wait);
+			continue;
+		}
+		if (!res.ok) throw new Error(`Figma API ${res.status}: ${await res.text()}`);
+		return res.json() as Promise<T>;
+	}
 }
 
 export function parseFileKey(input: string): string {
@@ -84,7 +99,7 @@ function isInteresting(node: FigmaNode, role: SemanticRole): boolean {
 }
 
 const MAX_NODES_PER_SCREEN = 150;
-const NODES_PER_REQUEST = 5;
+const NODES_PER_REQUEST = 10; // split-on-400 handles oversized batches; fewer requests = friendlier to rate limits
 
 // Large files 400 on a whole-file GET ("Request too large"), so subtrees are
 // fetched per-frame in small batches. A failing batch splits in half; a single
@@ -118,6 +133,7 @@ async function fetchSubtrees(fileKey: string, ids: string[]): Promise<Map<string
 	};
 
 	for (let i = 0; i < ids.length; i += NODES_PER_REQUEST) {
+		if (i > 0) await sleep(300); // pace requests instead of bursting into the rate limit
 		await fetchBatch(ids.slice(i, i + NODES_PER_REQUEST));
 	}
 	return out;
