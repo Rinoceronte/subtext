@@ -29,6 +29,10 @@ interface FigmaFileResponse {
 	document?: { children?: FigmaNode[] };
 }
 
+interface FigmaNodesResponse {
+	nodes?: Record<string, { document?: FigmaNode } | null>;
+}
+
 interface FigmaImagesResponse {
 	images?: Record<string, string | null>;
 }
@@ -80,9 +84,48 @@ function isInteresting(node: FigmaNode, role: SemanticRole): boolean {
 }
 
 const MAX_NODES_PER_SCREEN = 150;
+const NODES_PER_REQUEST = 5;
+
+// Large files 400 on a whole-file GET ("Request too large"), so subtrees are
+// fetched per-frame in small batches. A failing batch splits in half; a single
+// frame that is still too large retries at decreasing depth before giving up.
+async function fetchSubtrees(fileKey: string, ids: string[]): Promise<Map<string, FigmaNode>> {
+	const out = new Map<string, FigmaNode>();
+
+	const fetchBatch = async (batch: string[], depth?: number): Promise<void> => {
+		const depthParam = depth ? `&depth=${depth}` : '';
+		try {
+			const res = await figmaGet<FigmaNodesResponse>(
+				`/files/${fileKey}/nodes?ids=${batch.map(encodeURIComponent).join(',')}${depthParam}`
+			);
+			for (const [id, entry] of Object.entries(res.nodes ?? {})) {
+				if (entry?.document) out.set(id, entry.document);
+			}
+		} catch (e) {
+			const tooLarge = e instanceof Error && e.message.includes('400');
+			if (!tooLarge) throw e;
+			if (batch.length > 1) {
+				const mid = Math.ceil(batch.length / 2);
+				await fetchBatch(batch.slice(0, mid), depth);
+				await fetchBatch(batch.slice(mid), depth);
+			} else if (!depth) {
+				await fetchBatch(batch, 8);
+			} else if (depth > 3) {
+				await fetchBatch(batch, depth - 3);
+			}
+			// depth exhausted: skip this frame — it stays an un-annotated screen
+		}
+	};
+
+	for (let i = 0; i < ids.length; i += NODES_PER_REQUEST) {
+		await fetchBatch(ids.slice(i, i + NODES_PER_REQUEST));
+	}
+	return out;
+}
 
 export async function ingestFile(fileKey: string): Promise<IntentGraph> {
-	const file = await figmaGet<FigmaFileResponse>(`/files/${fileKey}`);
+	// depth=2 → pages and their top-level frames only, which always fits
+	const file = await figmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=2`);
 	const pages: FigmaNode[] = file.document?.children ?? [];
 
 	const screens: Screen[] = [];
@@ -105,14 +148,16 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 		}
 	}
 
-	// Pass 2: walk each screen's tree and seed intent nodes.
+	// Pass 2: fetch each screen's subtree in batches, walk it, seed intent nodes.
 	// Past the per-screen cap we keep counting instead of adding, so
 	// truncation is recorded on the screen — never silently dropped.
-	for (const page of pages) {
-		for (const frame of page.children ?? []) {
-			const screenId = frameIdToScreenId.get(frame.id);
-			const screen = screens.find((s) => s.id === screenId);
-			if (!screenId || !screen) continue;
+	const subtrees = await fetchSubtrees(fileKey, screens.map((s) => s.figmaNodeId));
+
+	for (const screen of screens) {
+		const root = subtrees.get(screen.figmaNodeId);
+		if (!root) continue; // subtree fetch gave up — screen stays un-annotated
+		{
+			const screenId = screen.id;
 			let count = 0;
 			let dropped = 0;
 			const walk = (node: FigmaNode) => {
@@ -155,19 +200,19 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 				}
 				for (const child of node.children ?? []) walk(child);
 			};
-			for (const child of frame.children ?? []) walk(child);
+			for (const child of root.children ?? []) walk(child);
 			if (dropped > 0) screen.truncatedNodes = dropped;
 		}
 	}
 
 	// Pass 3: screen renders via the image-export API (also future overlay input)
-	if (screens.length) {
-		const ids = screens.map((s) => s.figmaNodeId).join(',');
+	for (let i = 0; i < screens.length; i += 40) {
+		const batch = screens.slice(i, i + 40);
 		try {
 			const images = await figmaGet<FigmaImagesResponse>(
-				`/images/${fileKey}?ids=${ids}&format=png&scale=2`
+				`/images/${fileKey}?ids=${batch.map((s) => encodeURIComponent(s.figmaNodeId)).join(',')}&format=png&scale=2`
 			);
-			for (const screen of screens) {
+			for (const screen of batch) {
 				screen.imageUrl = images.images?.[screen.figmaNodeId] ?? undefined;
 			}
 		} catch {
