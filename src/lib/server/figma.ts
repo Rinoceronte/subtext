@@ -2,6 +2,7 @@
 // We read the design; we never re-implement it. Prototype links seed
 // interactions, names/structure seed roles — everything lands as
 // provenance.origin = 'inferred' with needsReview where confidence is low.
+import { randomUUID } from 'node:crypto';
 import { env } from '$env/dynamic/private';
 import type {
 	IntentGraph,
@@ -23,20 +24,29 @@ interface FigmaNode {
 	visible?: boolean;
 }
 
-async function figmaGet(path: string): Promise<any> {
+interface FigmaFileResponse {
+	name?: string;
+	document?: { children?: FigmaNode[] };
+}
+
+interface FigmaImagesResponse {
+	images?: Record<string, string | null>;
+}
+
+async function figmaGet<T>(path: string): Promise<T> {
 	const token = env.FIGMA_TOKEN;
 	if (!token) throw new Error('FIGMA_TOKEN is not set');
 	const res = await fetch(`${FIGMA_API}${path}`, {
 		headers: { 'X-Figma-Token': token }
 	});
 	if (!res.ok) throw new Error(`Figma API ${res.status}: ${await res.text()}`);
-	return res.json();
+	return res.json() as Promise<T>;
 }
 
 export function parseFileKey(input: string): string {
-	// Accepts a raw key or any figma.com/design|file/<key>/... URL
+	// Accepts a raw key or any figma.com/design|file|proto/<key>/... URL
 	const match = input.match(/figma\.com\/(?:design|file|proto)\/([a-zA-Z0-9]+)/);
-	return match ? match[1] : input.trim();
+	return match?.[1] ?? input.trim();
 }
 
 function inferRole(node: FigmaNode): SemanticRole {
@@ -70,10 +80,9 @@ function isInteresting(node: FigmaNode, role: SemanticRole): boolean {
 }
 
 const MAX_NODES_PER_SCREEN = 150;
-const MAX_DEPTH = 6;
 
 export async function ingestFile(fileKey: string): Promise<IntentGraph> {
-	const file = await figmaGet(`/files/${fileKey}`);
+	const file = await figmaGet<FigmaFileResponse>(`/files/${fileKey}`);
 	const pages: FigmaNode[] = file.document?.children ?? [];
 
 	const screens: Screen[] = [];
@@ -96,50 +105,58 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 		}
 	}
 
-	// Pass 2: walk each screen's tree and seed intent nodes
+	// Pass 2: walk each screen's tree and seed intent nodes.
+	// Past the per-screen cap we keep counting instead of adding, so
+	// truncation is recorded on the screen — never silently dropped.
 	for (const page of pages) {
 		for (const frame of page.children ?? []) {
 			const screenId = frameIdToScreenId.get(frame.id);
-			if (!screenId) continue;
+			const screen = screens.find((s) => s.id === screenId);
+			if (!screenId || !screen) continue;
 			let count = 0;
-			const walk = (node: FigmaNode, depth: number) => {
-				if (depth > MAX_DEPTH || count >= MAX_NODES_PER_SCREEN) return;
+			let dropped = 0;
+			const walk = (node: FigmaNode) => {
 				const role = inferRole(node);
 				if (isInteresting(node, role)) {
-					count++;
-					const interactions: Interaction[] = [];
-					if (node.transitionNodeID) {
-						const targetScreen = frameIdToScreenId.get(node.transitionNodeID);
-						interactions.push({
-							trigger: 'click',
-							action: 'navigate',
-							target: targetScreen ?? node.transitionNodeID
+					if (count >= MAX_NODES_PER_SCREEN) {
+						dropped++;
+					} else {
+						count++;
+						const interactions: Interaction[] = [];
+						if (node.transitionNodeID) {
+							const targetScreen = frameIdToScreenId.get(node.transitionNodeID);
+							interactions.push({
+								trigger: 'click',
+								action: 'navigate',
+								target: targetScreen ?? node.transitionNodeID
+							});
+						}
+						nodes.push({
+							id: `n_${node.id.replace(/[:;]/g, '-')}`,
+							figmaNodeId: node.id,
+							figmaNodeName: node.name,
+							figmaNodeType: node.type,
+							screenId,
+							role,
+							label: label(node),
+							interactions,
+							dataBindings: [],
+							businessRules: [],
+							states: [],
+							acceptanceCriteria: [],
+							provenance: {
+								origin: 'inferred',
+								confidence: interactions.length ? 0.7 : 0.5,
+								needsReview: true
+							},
+							status: 'draft'
 						});
 					}
-					nodes.push({
-						id: `n_${node.id.replace(/[:;]/g, '-')}`,
-						figmaNodeId: node.id,
-						figmaNodeName: node.name,
-						figmaNodeType: node.type,
-						screenId,
-						role,
-						label: label(node),
-						interactions,
-						dataBindings: [],
-						businessRules: [],
-						states: [],
-						acceptanceCriteria: [],
-						provenance: {
-							origin: 'inferred',
-							confidence: interactions.length ? 0.7 : 0.5,
-							needsReview: true
-						},
-						status: 'draft'
-					});
 				}
-				for (const child of node.children ?? []) walk(child, depth + 1);
+				for (const child of node.children ?? []) walk(child);
 			};
-			for (const child of frame.children ?? []) walk(child, 1);
+			for (const child of frame.children ?? []) walk(child);
+			if (dropped > 0) screen.truncatedNodes = dropped;
 		}
 	}
 
@@ -147,7 +164,9 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 	if (screens.length) {
 		const ids = screens.map((s) => s.figmaNodeId).join(',');
 		try {
-			const images = await figmaGet(`/images/${fileKey}?ids=${ids}&format=png&scale=2`);
+			const images = await figmaGet<FigmaImagesResponse>(
+				`/images/${fileKey}?ids=${ids}&format=png&scale=2`
+			);
 			for (const screen of screens) {
 				screen.imageUrl = images.images?.[screen.figmaNodeId] ?? undefined;
 			}
@@ -158,7 +177,7 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 
 	return {
 		project: {
-			id: `p_${Date.now().toString(36)}`,
+			id: `p_${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
 			name: file.name ?? fileKey,
 			figmaFileKey: fileKey,
 			createdAt: new Date().toISOString()

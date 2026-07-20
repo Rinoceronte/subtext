@@ -26,6 +26,7 @@ export interface Screen {
 	name: string;
 	purpose: string; // one line: what this screen is for — human-confirmed
 	imageUrl?: string; // Figma image-export render, fetched at ingest
+	truncatedNodes?: number; // interesting nodes ingest could NOT annotate (over cap) — shown, never silent
 	provenance: Provenance;
 }
 
@@ -121,4 +122,8 @@ export interface IntentGraph {
 
 export function figmaDeepLink(fileKey: string, figmaNodeId: string): string {
 	return `https://www.figma.com/design/${fileKey}/?node-id=${figmaNodeId.replace(':', '-')}`;
+}
+
+export function figmaEmbedUrl(fileKey: string, figmaNodeId: string): string {
+	return `https://embed.figma.com/design/${fileKey}/?node-id=${figmaNodeId.replace(':', '-')}&embed-host=subtext`;
 }

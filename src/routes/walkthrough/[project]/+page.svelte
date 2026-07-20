@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { enhance } from '$app/forms';
-	import { figmaDeepLink } from '$lib/schema';
+	import { figmaDeepLink, figmaEmbedUrl } from '$lib/schema';
 	import type { ActionData, PageData } from './$types';
 
 	let { data, form }: { data: PageData; form: ActionData } = $props();
@@ -10,18 +10,20 @@
 
 	const graph = $derived(data.graph);
 	const screen = $derived(graph.screens[screenIndex]);
-	const screenNodes = $derived(graph.nodes.filter((n) => n.screenId === screen?.id));
+	const screenNodes = $derived(
+		screen ? graph.nodes.filter((n) => n.screenId === screen.id) : []
+	);
 	const openQuestions = $derived(
-		graph.questions.filter(
-			(q) =>
-				q.status === 'open' &&
-				(q.nodeIds.includes(screen?.id) || screenNodes.some((n) => q.nodeIds.includes(n.id)))
-		)
+		screen
+			? graph.questions.filter(
+					(q) =>
+						q.status === 'open' &&
+						(q.nodeIds.includes(screen.id) || screenNodes.some((n) => q.nodeIds.includes(n.id)))
+				)
+			: []
 	);
 	const embedUrl = $derived(
-		screen
-			? `https://embed.figma.com/design/${graph.project.figmaFileKey}/?node-id=${screen.figmaNodeId.replace(':', '-')}&embed-host=subtext`
-			: ''
+		screen ? figmaEmbedUrl(graph.project.figmaFileKey, screen.figmaNodeId) : ''
 	);
 </script>
 
@@ -43,6 +45,7 @@
 			<button class="primary">Compile plan</button>
 		</form>
 		{#if form && 'compiled' in form}<span class="ok">{form.compiled} files compiled</span>{/if}
+		{#if form && 'error' in form && form.error}<span class="error">{form.error}</span>{/if}
 	</header>
 
 	{#if screen}
@@ -51,6 +54,9 @@
 				<h2>{screen.name}</h2>
 				<a href={figmaDeepLink(graph.project.figmaFileKey, screen.figmaNodeId)} target="_blank">open in Figma ↗</a>
 				<label><input type="checkbox" bind:checked={showEmbed} /> live view</label>
+				{#if screen.truncatedNodes}
+					<span class="warn">⚠ {screen.truncatedNodes} nodes over the ingest cap were not annotated</span>
+				{/if}
 			</div>
 			{#if showEmbed}
 				<iframe src={embedUrl} title="{screen.name} in Figma" allowfullscreen></iframe>
@@ -289,6 +295,14 @@
 	.ok {
 		color: #2e7d46;
 		font-size: 0.85rem;
+	}
+	.error {
+		color: #c0392b;
+		font-size: 0.85rem;
+	}
+	.warn {
+		color: #9a6b00;
+		font-size: 0.8rem;
 	}
 	.dim {
 		color: #999;
