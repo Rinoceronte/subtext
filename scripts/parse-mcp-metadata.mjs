@@ -90,12 +90,14 @@ function addScreen(el, sectionName) {
 		figmaNodeId: id,
 		name: sectionName ? `${sectionName} / ${name}` : name,
 		purpose: '',
+		size: { w: Math.round(Number(width)), h: Math.round(Number(height)) },
 		provenance: { origin: 'inferred', confidence: 0.4, needsReview: true }
 	});
 
 	let count = 0;
 	let dropped = 0;
-	const walk = (node) => {
+	// metadata x/y are parent-relative; accumulate to screen-relative
+	const walk = (node, offX, offY) => {
 		const role = inferRole(node.tag, node.attrs.name ?? '');
 		if (isInteresting(node.tag, role, node.attrs)) {
 			if (count >= MAX_NODES_PER_SCREEN) {
@@ -110,6 +112,12 @@ function addScreen(el, sectionName) {
 					screenId,
 					role,
 					label: node.attrs.name ?? '',
+					bbox: {
+						x: Math.round(offX + Number(node.attrs.x ?? 0)),
+						y: Math.round(offY + Number(node.attrs.y ?? 0)),
+						w: Math.round(Number(node.attrs.width ?? 0)),
+						h: Math.round(Number(node.attrs.height ?? 0))
+					},
 					interactions: [],
 					dataBindings: [],
 					businessRules: [],
@@ -120,9 +128,11 @@ function addScreen(el, sectionName) {
 				});
 			}
 		}
-		for (const child of node.children) walk(child);
+		const childX = offX + Number(node.attrs.x ?? 0);
+		const childY = offY + Number(node.attrs.y ?? 0);
+		for (const child of node.children) walk(child, childX, childY);
 	};
-	for (const child of el.children) walk(child);
+	for (const child of el.children) walk(child, 0, 0);
 	if (dropped > 0) screens[screens.length - 1].truncatedNodes = dropped;
 }
 

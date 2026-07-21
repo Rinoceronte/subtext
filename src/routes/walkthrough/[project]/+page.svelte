@@ -7,9 +7,24 @@
 
 	let screenIndex = $state(0);
 	let showEmbed = $state(false);
+	let selectedNodeId = $state<string | null>(null);
 
 	const graph = $derived(data.graph);
 	const screen = $derived(graph.screens[screenIndex]);
+	const selectedNode = $derived(
+		selectedNodeId ? (graph.nodes.find((n) => n.id === selectedNodeId) ?? null) : null
+	);
+
+	function goTo(index: number) {
+		screenIndex = index;
+		selectedNodeId = null;
+	}
+
+	$effect(() => {
+		if (selectedNodeId) {
+			document.querySelector('.hl')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		}
+	});
 	const screenNodes = $derived(
 		screen ? graph.nodes.filter((n) => n.screenId === screen.id) : []
 	);
@@ -34,10 +49,10 @@
 		<a href="/">subtext</a>
 		<strong>{graph.project.name}</strong>
 		<nav>
-			<button onclick={() => (screenIndex = Math.max(0, screenIndex - 1))} disabled={screenIndex === 0}>←</button>
+			<button onclick={() => goTo(Math.max(0, screenIndex - 1))} disabled={screenIndex === 0}>←</button>
 			<span>{screenIndex + 1} / {graph.screens.length}</span>
 			<button
-				onclick={() => (screenIndex = Math.min(graph.screens.length - 1, screenIndex + 1))}
+				onclick={() => goTo(Math.min(graph.screens.length - 1, screenIndex + 1))}
 				disabled={screenIndex >= graph.screens.length - 1}>→</button
 			>
 		</nav>
@@ -61,7 +76,19 @@
 			{#if showEmbed}
 				<iframe src={embedUrl} title="{screen.name} in Figma" allowfullscreen></iframe>
 			{:else if screen.imageUrl}
-				<img src={screen.imageUrl} alt="Design render of {screen.name}" />
+				<div class="canvas">
+					<img src={screen.imageUrl} alt="Design render of {screen.name}" />
+					{#if selectedNode?.bbox && screen.size && selectedNode.screenId === screen.id}
+						<div
+							class="hl"
+							style="left:{(selectedNode.bbox.x / screen.size.w) * 100}%; top:{(selectedNode.bbox.y /
+								screen.size.h) *
+								100}%; width:{(selectedNode.bbox.w / screen.size.w) * 100}%; height:{(selectedNode.bbox.h /
+								screen.size.h) *
+								100}%"
+						></div>
+					{/if}
+				</div>
 			{:else}
 				<p class="dim">No render available — toggle live view.</p>
 			{/if}
@@ -81,7 +108,13 @@
 				<div class="block questions">
 					<h3>Questions ({openQuestions.length})</h3>
 					{#each openQuestions as q (q.id)}
-						<div class="question">
+						<div
+							class="question"
+							role="button"
+							tabindex="0"
+							onclick={() => (selectedNodeId = q.nodeIds.find((id) => graph.nodes.some((n) => n.id === id)) ?? null)}
+							onkeydown={(e) => e.key === 'Enter' && (selectedNodeId = q.nodeIds.find((id) => graph.nodes.some((n) => n.id === id)) ?? null)}
+						>
 							<p>{q.question}</p>
 							<p class="why">{q.why}</p>
 							<form method="POST" action="?/answer" use:enhance>
@@ -101,10 +134,12 @@
 			<div class="block">
 				<h3>Notes ({screenNodes.length})</h3>
 				{#each screenNodes as node (node.id)}
-					<div class="node" class:confirmed={node.status === 'confirmed'}>
+					<div class="node" class:confirmed={node.status === 'confirmed'} class:selected={selectedNodeId === node.id}>
 						<div class="node-head">
 							<span class="role">{node.role}</span>
-							<a href={figmaDeepLink(graph.project.figmaFileKey, node.figmaNodeId)} target="_blank">{node.label}</a>
+							<button class="node-link" onclick={() => (selectedNodeId = node.id)} disabled={!node.bbox}>
+								{node.label}
+							</button>
 							<span class="conf" title="confidence">{Math.round(node.provenance.confidence * 100)}%</span>
 						</div>
 						{#if node.meaning}<p class="meaning">{node.meaning}</p>{/if}
@@ -178,11 +213,44 @@
 	.design-bar h2 {
 		margin: 0;
 	}
+	.canvas {
+		position: relative;
+		display: inline-block;
+		max-width: 100%;
+	}
 	.design img {
 		max-width: 100%;
 		border: 1px solid #ddd;
 		border-radius: 8px;
 		background: white;
+		display: block;
+	}
+	.hl {
+		position: absolute;
+		outline: 2px solid #e0356b;
+		outline-offset: 2px;
+		background: rgba(224, 53, 107, 0.12);
+		border-radius: 3px;
+		pointer-events: none;
+	}
+	.node-link {
+		border: none;
+		background: none;
+		padding: 0;
+		color: #1a56db;
+		cursor: pointer;
+		text-align: left;
+		font-size: inherit;
+	}
+	.node-link:disabled {
+		color: inherit;
+		cursor: default;
+	}
+	.node.selected {
+		border-color: #e0356b;
+	}
+	.question {
+		cursor: pointer;
 	}
 	.design iframe {
 		width: 100%;

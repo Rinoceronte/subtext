@@ -26,6 +26,7 @@ export interface Screen {
 	name: string;
 	purpose: string; // one line: what this screen is for — human-confirmed
 	imageUrl?: string; // Figma image-export render, fetched at ingest
+	size?: { w: number; h: number }; // design-px dimensions — scales node bboxes onto the render
 	truncatedNodes?: number; // interesting nodes ingest could NOT annotate (over cap) — shown, never silent
 	provenance: Provenance;
 }
@@ -43,6 +44,7 @@ export interface IntentNode {
 	role: SemanticRole;
 	label: string;
 	meaning?: string; // "this section means X" — one line, human-confirmed
+	bbox?: { x: number; y: number; w: number; h: number }; // design px, relative to the owning screen
 
 	// Behavior tier — seedable from Figma prototype links, human-confirmed
 	interactions: Interaction[];

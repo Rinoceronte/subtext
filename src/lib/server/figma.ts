@@ -24,6 +24,7 @@ interface FigmaNode {
 	characters?: string; // TEXT nodes
 	transitionNodeID?: string | null; // prototype link target
 	visible?: boolean;
+	absoluteBoundingBox?: { x: number; y: number; width: number; height: number };
 }
 
 interface FigmaFileResponse {
@@ -228,6 +229,9 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 				figmaNodeId: frame.id,
 				name: frame.name,
 				purpose: '', // inferred/confirmed later — never fabricated
+				size: frame.absoluteBoundingBox
+					? { w: Math.round(frame.absoluteBoundingBox.width), h: Math.round(frame.absoluteBoundingBox.height) }
+					: undefined,
 				provenance: { origin: 'inferred', confidence: 0.4, needsReview: true }
 			});
 		}
@@ -247,6 +251,7 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 		const fromTree = framesById.get(screen.figmaNodeId);
 		const root = fromTree?.children?.length ? fromTree : subtrees.get(screen.figmaNodeId);
 		if (!root) continue; // subtree fetch gave up — screen stays un-annotated
+		const origin = root.absoluteBoundingBox;
 		{
 			const screenId = screen.id;
 			let count = 0;
@@ -267,6 +272,7 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 								target: targetScreen ?? node.transitionNodeID
 							});
 						}
+						const box = node.absoluteBoundingBox;
 						nodes.push({
 							id: `n_${node.id.replace(/[:;]/g, '-')}`,
 							figmaNodeId: node.id,
@@ -275,6 +281,15 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 							screenId,
 							role,
 							label: label(node),
+							bbox:
+								box && origin
+									? {
+											x: Math.round(box.x - origin.x),
+											y: Math.round(box.y - origin.y),
+											w: Math.round(box.width),
+											h: Math.round(box.height)
+										}
+									: undefined,
 							interactions,
 							dataBindings: [],
 							businessRules: [],
