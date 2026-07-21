@@ -2,7 +2,9 @@
 // We read the design; we never re-implement it. Prototype links seed
 // interactions, names/structure seed roles — everything lands as
 // provenance.origin = 'inferred' with needsReview where confidence is low.
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { env } from '$env/dynamic/private';
 import type {
 	IntentGraph,
@@ -71,6 +73,48 @@ async function figmaGet<T>(path: string): Promise<T> {
 	}
 }
 
+// Disk cache for Figma responses: a rerun on the same design must never
+// re-spend rate-limit budget. Fresh entries are served without any API call;
+// stale entries are still served as a fallback when Figma rate-limits us.
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const cacheDir = () => join(env.DATA_DIR || 'data', 'figma-cache');
+const cacheFile = (path: string) =>
+	join(cacheDir(), createHash('sha1').update(path).digest('hex') + '.json');
+
+interface CacheEntry {
+	path: string;
+	fetchedAt: number;
+	body: unknown;
+}
+
+async function readCache(path: string): Promise<CacheEntry | null> {
+	try {
+		return JSON.parse(await readFile(cacheFile(path), 'utf-8')) as CacheEntry;
+	} catch {
+		return null;
+	}
+}
+
+async function cachedFigmaGet<T>(path: string): Promise<T> {
+	const cached = await readCache(path);
+	if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+		return cached.body as T;
+	}
+	try {
+		const body = await figmaGet<T>(path);
+		await mkdir(cacheDir(), { recursive: true });
+		await writeFile(cacheFile(path), JSON.stringify({ path, fetchedAt: Date.now(), body }));
+		return body;
+	} catch (e) {
+		const rateLimited = e instanceof Error && (e.message.includes('429') || e.message.includes('rate limit'));
+		if (cached && rateLimited) {
+			console.log(`Figma rate limited — serving stale cache for ${path}`);
+			return cached.body as T;
+		}
+		throw e;
+	}
+}
+
 export function parseFileKey(input: string): string {
 	// Accepts a raw key or any figma.com/design|file|proto/<key>/... URL
 	const match = input.match(/figma\.com\/(?:design|file|proto)\/([a-zA-Z0-9]+)/);
@@ -119,7 +163,7 @@ async function fetchSubtrees(fileKey: string, ids: string[]): Promise<Map<string
 	const fetchBatch = async (batch: string[], depth?: number): Promise<void> => {
 		const depthParam = depth ? `&depth=${depth}` : '';
 		try {
-			const res = await figmaGet<FigmaNodesResponse>(
+			const res = await cachedFigmaGet<FigmaNodesResponse>(
 				`/files/${fileKey}/nodes?ids=${batch.map(encodeURIComponent).join(',')}${depthParam}`
 			);
 			for (const [id, entry] of Object.entries(res.nodes ?? {})) {
@@ -154,13 +198,13 @@ async function fetchSubtrees(fileKey: string, ids: string[]): Promise<Map<string
 async function fetchTree(fileKey: string): Promise<FigmaFileResponse> {
 	for (const depth of [5, 4, 3]) {
 		try {
-			return await figmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=${depth}`);
+			return await cachedFigmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=${depth}`);
 		} catch (e) {
 			const tooLarge = e instanceof Error && e.message.includes('Figma API 400');
 			if (!tooLarge) throw e;
 		}
 	}
-	return figmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=2`);
+	return cachedFigmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=2`);
 }
 
 export async function ingestFile(fileKey: string): Promise<IntentGraph> {
@@ -256,7 +300,7 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 	for (let i = 0; i < screens.length; i += 40) {
 		const batch = screens.slice(i, i + 40);
 		try {
-			const images = await figmaGet<FigmaImagesResponse>(
+			const images = await cachedFigmaGet<FigmaImagesResponse>(
 				`/images/${fileKey}?ids=${batch.map((s) => encodeURIComponent(s.figmaNodeId)).join(',')}&format=png&scale=2`
 			);
 			for (const screen of batch) {
