@@ -59,6 +59,7 @@
 		<form method="POST" action="?/compile" use:enhance>
 			<button class="primary">Compile plan</button>
 		</form>
+		<a href="/walkthrough/{graph.project.id}/plans">view plans</a>
 		{#if form && 'compiled' in form}<span class="ok">{form.compiled} files compiled</span>{/if}
 		{#if form && 'error' in form && form.error}<span class="error">{form.error}</span>{/if}
 	</header>
