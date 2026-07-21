@@ -40,7 +40,7 @@ interface FigmaImagesResponse {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const MAX_RETRIES = 6;
-const MAX_WAIT_MS = 60_000;
+const MAX_WAIT_MS = 5 * 60_000; // honor long Retry-After values, within reason
 
 async function figmaGet<T>(path: string): Promise<T> {
 	const token = env.FIGMA_TOKEN;
@@ -139,14 +139,29 @@ async function fetchSubtrees(fileKey: string, ids: string[]): Promise<Map<string
 	return out;
 }
 
+// One depth-limited whole-file request is far cheaper against Figma's rate
+// budget than per-frame fetches. Start deep and back off until it fits;
+// depth=2 (pages + frames only) always fits.
+async function fetchTree(fileKey: string): Promise<FigmaFileResponse> {
+	for (const depth of [5, 4, 3]) {
+		try {
+			return await figmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=${depth}`);
+		} catch (e) {
+			const tooLarge = e instanceof Error && e.message.includes('Figma API 400');
+			if (!tooLarge) throw e;
+		}
+	}
+	return figmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=2`);
+}
+
 export async function ingestFile(fileKey: string): Promise<IntentGraph> {
-	// depth=2 → pages and their top-level frames only, which always fits
-	const file = await figmaGet<FigmaFileResponse>(`/files/${fileKey}?depth=2`);
+	const file = await fetchTree(fileKey);
 	const pages: FigmaNode[] = file.document?.children ?? [];
 
 	const screens: Screen[] = [];
 	const nodes: IntentNode[] = [];
 	const frameIdToScreenId = new Map<string, string>();
+	const framesById = new Map<string, FigmaNode>();
 
 	// Pass 1: every top-level frame on every page is a screen
 	for (const page of pages) {
@@ -154,6 +169,7 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 			if (frame.type !== 'FRAME' && frame.type !== 'COMPONENT') continue;
 			const screenId = `s_${frame.id.replace(/[:;]/g, '-')}`;
 			frameIdToScreenId.set(frame.id, screenId);
+			framesById.set(frame.id, frame);
 			screens.push({
 				id: screenId,
 				figmaNodeId: frame.id,
@@ -164,13 +180,19 @@ export async function ingestFile(fileKey: string): Promise<IntentGraph> {
 		}
 	}
 
-	// Pass 2: fetch each screen's subtree in batches, walk it, seed intent nodes.
+	// Pass 2: walk each screen's tree and seed intent nodes. The depth-limited
+	// tree already contains most frames' children; only frames that came back
+	// childless need their subtree fetched individually (batched + paced).
 	// Past the per-screen cap we keep counting instead of adding, so
 	// truncation is recorded on the screen — never silently dropped.
-	const subtrees = await fetchSubtrees(fileKey, screens.map((s) => s.figmaNodeId));
+	const missing = screens.filter((s) => !framesById.get(s.figmaNodeId)?.children?.length);
+	const subtrees = missing.length
+		? await fetchSubtrees(fileKey, missing.map((s) => s.figmaNodeId))
+		: new Map<string, FigmaNode>();
 
 	for (const screen of screens) {
-		const root = subtrees.get(screen.figmaNodeId);
+		const fromTree = framesById.get(screen.figmaNodeId);
+		const root = fromTree?.children?.length ? fromTree : subtrees.get(screen.figmaNodeId);
 		if (!root) continue; // subtree fetch gave up — screen stays un-annotated
 		{
 			const screenId = screen.id;
