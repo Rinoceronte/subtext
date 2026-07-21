@@ -52,8 +52,17 @@ async function figmaGet<T>(path: string): Promise<T> {
 		});
 		if (res.status === 429 && attempt < MAX_RETRIES) {
 			const retryAfter = Number(res.headers.get('retry-after')) * 1000 || 0;
+			// A wait beyond our patience means a long quota window — blind
+			// retries just burn more budget. Fail fast with the real number.
+			if (retryAfter > MAX_WAIT_MS) {
+				throw new Error(
+					`Figma rate limit: asked to retry in ${Math.ceil(retryAfter / 60_000)} minutes — wait that long, then rerun`
+				);
+			}
 			const wait = Math.min(Math.max(retryAfter, 2000 * 2 ** attempt), MAX_WAIT_MS);
-			console.log(`Figma rate limit hit — waiting ${Math.round(wait / 1000)}s before retry`);
+			console.log(
+				`Figma rate limit hit — waiting ${Math.round(wait / 1000)}s (Retry-After: ${retryAfter ? Math.round(retryAfter / 1000) + 's' : 'not sent'})`
+			);
 			await sleep(wait);
 			continue;
 		}
