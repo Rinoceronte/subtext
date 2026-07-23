@@ -4,6 +4,12 @@
 
 The intent-capture layer between a Figma design and code-generating agents: pull down the design, work out what goes to what, capture the behavior and business rules the design is silent about, and compile epics/stories/tasks plus per-task AI build plans.
 
+![Walkthrough — screen-by-screen review with AI notes, clarifying questions, and confirm/correct controls](docs/screenshots/walkthrough.png)
+*The walkthrough: the design on one side; inferred purpose, notes, and clarifying questions with confirm/correct controls on the other.*
+
+![Compiled plan — epics, stories, backend rules, and per-node build plans with derived acceptance criteria](docs/screenshots/compiled-plan.png)
+*Compile plan: epics/stories, extracted backend rules, and agent-ready build plans — acceptance criteria are always derived from captured intent, never authored.*
+
 Full spec: [BRIEF.md](./BRIEF.md). Read its Non-goals and Operating principles before writing code.
 
 ## Run
